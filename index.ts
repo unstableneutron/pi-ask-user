@@ -15,14 +15,13 @@ import {
 	type EditorTheme,
 	Key,
 	matchesKey,
-	SelectList,
-	type SelectItem,
 	Spacer,
 	Text,
 	type TUI,
 	truncateToWidth,
 	wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
+import { renderSingleSelectRows } from "./single-select-layout";
 
 interface QuestionOption {
 	title: string;
@@ -92,6 +91,9 @@ function createEditorTheme(theme: Theme): EditorTheme {
 }
 
 type AskMode = "select" | "freeform";
+
+const ASK_OVERLAY_MAX_HEIGHT_RATIO = 0.85;
+const ASK_OVERLAY_WIDTH = "92%";
 
 class MultiSelectList implements Component {
 	private options: QuestionOption[];
@@ -262,6 +264,135 @@ class MultiSelectList implements Component {
 	}
 }
 
+class WrappedSingleSelectList implements Component {
+	private options: QuestionOption[];
+	private allowFreeform: boolean;
+	private theme: Theme;
+	private selectedIndex = 0;
+	private maxVisibleRows = 12;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
+	public onCancel?: () => void;
+	public onSubmit?: (result: string) => void;
+	public onEnterFreeform?: () => void;
+
+	constructor(options: QuestionOption[], allowFreeform: boolean, theme: Theme) {
+		this.options = options;
+		this.allowFreeform = allowFreeform;
+		this.theme = theme;
+	}
+
+	setMaxVisibleRows(rows: number): void {
+		const next = Math.max(1, Math.floor(rows));
+		if (next !== this.maxVisibleRows) {
+			this.maxVisibleRows = next;
+			this.invalidate();
+		}
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+
+	private getItemCount(): number {
+		return this.options.length + (this.allowFreeform ? 1 : 0);
+	}
+
+	private isFreeformRow(index: number): boolean {
+		return this.allowFreeform && index === this.options.length;
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+			this.onCancel?.();
+			return;
+		}
+
+		const count = this.getItemCount();
+		if (count === 0) {
+			this.onCancel?.();
+			return;
+		}
+
+		if (matchesKey(data, Key.up) || matchesKey(data, Key.shift("tab"))) {
+			this.selectedIndex = this.selectedIndex === 0 ? count - 1 : this.selectedIndex - 1;
+			this.invalidate();
+			return;
+		}
+
+		if (matchesKey(data, Key.down) || matchesKey(data, Key.tab)) {
+			this.selectedIndex = this.selectedIndex === count - 1 ? 0 : this.selectedIndex + 1;
+			this.invalidate();
+			return;
+		}
+
+		const numMatch = data.match(/^[1-9]$/);
+		if (numMatch) {
+			const idx = Number.parseInt(numMatch[0], 10) - 1;
+			if (idx >= 0 && idx < count) {
+				this.selectedIndex = idx;
+				this.invalidate();
+			}
+			return;
+		}
+
+		if (matchesKey(data, Key.enter)) {
+			if (this.isFreeformRow(this.selectedIndex)) {
+				this.onEnterFreeform?.();
+				return;
+			}
+
+			const result = this.options[this.selectedIndex]?.title;
+			if (result) this.onSubmit?.(result);
+			else this.onCancel?.();
+		}
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+
+		const count = this.getItemCount();
+		if (count === 0) {
+			this.cachedLines = [this.theme.fg("warning", "No options")];
+			this.cachedWidth = width;
+			return this.cachedLines;
+		}
+
+		const lines = renderSingleSelectRows({
+			options: this.options,
+			selectedIndex: this.selectedIndex,
+			width,
+			allowFreeform: this.allowFreeform,
+			maxRows: this.maxVisibleRows,
+		}).map((line) => {
+			const trimmed = line.trim();
+			let styled = line;
+
+			if (trimmed.startsWith("(")) {
+				styled = this.theme.fg("dim", line);
+			} else if (line.startsWith("      ")) {
+				styled = this.theme.fg("muted", line);
+			} else if (line.startsWith("→")) {
+				styled = this.theme.fg("accent", this.theme.bold(line));
+			} else if (trimmed.startsWith("Type something.")) {
+				styled = this.theme.fg("text", line);
+			} else {
+				styled = this.theme.fg("text", line);
+			}
+
+			return truncateToWidth(styled, width, "");
+		});
+
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		return lines;
+	}
+}
+
 /**
  * Interactive ask UI. Uses a root Container for layout and swaps the center
  * component between SelectList/MultiSelectList and an Editor (freeform mode).
@@ -286,7 +417,7 @@ class AskComponent extends Container {
 	private helpText: Text;
 
 	// Mode components
-	private selectList?: SelectList;
+	private singleSelectList?: WrappedSingleSelectList;
 	private multiSelectList?: MultiSelectList;
 	private editor?: Editor;
 
@@ -364,9 +495,30 @@ class AskComponent extends Container {
 	}
 
 	override render(width: number): string[] {
+		if (this.mode === "select" && !this.allowMultiple) {
+			const overlayMaxHeight = Math.max(12, Math.floor(this.tui.terminal.rows * ASK_OVERLAY_MAX_HEIGHT_RATIO));
+			const staticLines = this.countStaticLines(width);
+			const availableOptionRows = Math.max(4, overlayMaxHeight - staticLines);
+			this.ensureSingleSelectList().setMaxVisibleRows(availableOptionRows);
+		}
+
 		// Defensive: ensure no line exceeds width, otherwise pi-tui will hard-crash.
 		const lines = super.render(width);
 		return lines.map((l) => truncateToWidth(l, width, ""));
+	}
+
+	private countWrappedLines(text: string, width: number): number {
+		return Math.max(1, wrapTextWithAnsi(text, Math.max(10, width - 2)).length);
+	}
+
+	private countStaticLines(width: number): number {
+		const titleLines = 1;
+		const questionLines = this.countWrappedLines(this.question, width);
+		const contextLines = this.context ? 1 + this.countWrappedLines(this.context, width) : 0;
+		const helpLines = 1;
+		const borderLines = 2;
+		const spacerLines = this.context ? 6 : 5;
+		return borderLines + spacerLines + titleLines + questionLines + contextLines + helpLines;
 	}
 
 	private updateStaticText(): void {
@@ -397,43 +549,16 @@ class AskComponent extends Container {
 		}
 	}
 
-	private buildSingleSelectItems(): SelectItem[] {
-		const items: SelectItem[] = this.options.map((o, idx) => ({
-			value: String(idx),
-			label: o.title,
-			description: o.description,
-		}));
+	private ensureSingleSelectList(): WrappedSingleSelectList {
+		if (this.singleSelectList) return this.singleSelectList;
 
-		if (this.allowFreeform) {
-			items.push({
-				value: FREEFORM_VALUE,
-				label: "Type something.",
-				description: "Enter a custom response",
-			});
-		}
+		const list = new WrappedSingleSelectList(this.options, this.allowFreeform, this.theme);
+		list.onSubmit = (result) => this.onDone(result);
+		list.onCancel = () => this.onDone(null);
+		list.onEnterFreeform = () => this.showFreeformMode();
 
-		return items;
-	}
-
-	private ensureSingleSelectList(): SelectList {
-		if (this.selectList) return this.selectList;
-
-		const items = this.buildSingleSelectItems();
-		const selectList = new SelectList(items, Math.min(items.length, 10), createSelectListTheme(this.theme));
-
-		selectList.onSelect = (item) => {
-			if (item.value === FREEFORM_VALUE) {
-				this.showFreeformMode();
-				return;
-			}
-			const idx = Number.parseInt(item.value, 10);
-			const option = this.options[idx];
-			this.onDone(option?.title ?? null);
-		};
-		selectList.onCancel = () => this.onDone(null);
-
-		this.selectList = selectList;
-		return selectList;
+		this.singleSelectList = list;
+		return list;
 	}
 
 	private ensureMultiSelectList(): MultiSelectList {
@@ -650,7 +775,15 @@ export default function (pi: ExtensionAPI) {
 							done,
 						);
 					},
-					{ overlay: true },
+					{
+						overlay: true,
+						overlayOptions: {
+							anchor: "center",
+							width: ASK_OVERLAY_WIDTH,
+							maxHeight: "85%",
+							margin: 1,
+						},
+					},
 				);
 			} catch (error) {
 				const message =
