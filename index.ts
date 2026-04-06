@@ -427,11 +427,15 @@ class WrappedSingleSelectList implements Component {
       return character;
    }
 
-   private styleListLine(line: string, width: number): string {
+   private styleListLine(line: string, width: number, isSelected: boolean): string {
       const trimmed = line.trim();
 
       if (trimmed.startsWith("(")) {
          return truncateToWidth(this.theme.fg("dim", line), width, "");
+      }
+
+      if (isSelected) {
+         return truncateToWidth(this.theme.fg("accent", this.theme.bold(line)), width, "");
       }
 
       if (line.startsWith("      ")) {
@@ -482,14 +486,15 @@ class WrappedSingleSelectList implements Component {
       }
 
       const maxRows = Math.max(1, this.maxVisibleRows - lines.length);
-      const optionLines = renderSingleSelectRows({
+      const optionRows = renderSingleSelectRows({
          options: filteredOptions,
          selectedIndex: this.selectedIndex,
          width,
          allowFreeform: this.allowFreeform,
          maxRows,
          hideDescriptions,
-      }).map((line) => this.styleListLine(line, width));
+      });
+      const optionLines = optionRows.map((row) => this.styleListLine(row.line, width, row.selected));
 
       lines.push(...optionLines);
       return lines.slice(0, this.maxVisibleRows);

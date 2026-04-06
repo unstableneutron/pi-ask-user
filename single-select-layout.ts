@@ -3,6 +3,11 @@ export interface QuestionOption {
 	description?: string;
 }
 
+export interface AnnotatedRow {
+	line: string;
+	selected: boolean;
+}
+
 export interface RenderSingleSelectRowsParams {
 	options: QuestionOption[];
 	selectedIndex: number;
@@ -114,8 +119,13 @@ function buildItemBlocks(
 	});
 }
 
-function flatten(blocks: ItemBlock[]): string[] {
-	return blocks.flatMap((block) => block.lines);
+function flatten(blocks: ItemBlock[], selectedIndex: number): AnnotatedRow[] {
+	return blocks.flatMap((block) =>
+		block.lines.map((line) => ({
+			line,
+			selected: block.itemIndex === selectedIndex,
+		})),
+	);
 }
 
 export function renderSingleSelectRows({
@@ -125,10 +135,10 @@ export function renderSingleSelectRows({
 	allowFreeform,
 	maxRows,
 	hideDescriptions,
-}: RenderSingleSelectRowsParams): string[] {
+}: RenderSingleSelectRowsParams): AnnotatedRow[] {
 	const itemCount = options.length + (allowFreeform ? 1 : 0);
 	const blocks = buildItemBlocks(options, width, allowFreeform, selectedIndex, hideDescriptions);
-	const allRows = flatten(blocks);
+	const allRows = flatten(blocks, selectedIndex);
 
 	if (!Number.isFinite(maxRows) || !maxRows || maxRows <= 0 || allRows.length <= maxRows) {
 		return allRows;
@@ -142,8 +152,11 @@ export function renderSingleSelectRows({
 	const availableRows = safeMaxRows > 1 ? safeMaxRows - 1 : 1;
 
 	if (selectedBlock.lines.length >= availableRows) {
-		const visible = selectedBlock.lines.slice(0, availableRows);
-		if (safeMaxRows > 1) visible.push(indicator);
+		const visible = selectedBlock.lines.slice(0, availableRows).map((line) => ({
+			line,
+			selected: true,
+		}));
+		if (safeMaxRows > 1) visible.push({ line: indicator, selected: false });
 		return visible.slice(0, safeMaxRows);
 	}
 
@@ -169,7 +182,7 @@ export function renderSingleSelectRows({
 		break;
 	}
 
-	const visible = flatten(blocks.slice(start, end));
-	visible.push(indicator);
+	const visible = flatten(blocks.slice(start, end), selectedIndex);
+	visible.push({ line: indicator, selected: false });
 	return visible.slice(0, safeMaxRows);
 }

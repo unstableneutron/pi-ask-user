@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.2](https://github.com/edlsh/pi-ask-user/releases/tag/v0.5.2) - 2026-04-06
+
+### Fixed
+
+- Multi-line selected option highlighting — when an option title wraps across multiple lines, all lines now highlight with accent styling instead of only the first line with the `→` pointer
+
+### Changed
+
+- `renderSingleSelectRows()` now returns `AnnotatedRow[]` (`{ line, selected }`) instead of plain strings, enabling callers to apply per-block styling
+
 ## [0.5.0](https://github.com/edlsh/pi-ask-user/releases/tag/v0.5.0) - 2026-03-25
 
 ### Added
