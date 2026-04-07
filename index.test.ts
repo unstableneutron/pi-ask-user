@@ -183,6 +183,50 @@ describe("ask_user", () => {
       expect(capturedOptions.overlayOptions.visible).toBeUndefined();
    });
 
+   test("falls back to dialog mode when the terminal is too small for the overlay", async () => {
+      const tool = await setupTool();
+      let selectCalled = false;
+
+      const result = await tool.execute(
+         "tool-call-id",
+         {
+            question: "This is a very long question that should wrap across multiple lines in a constrained terminal viewport and consume a meaningful amount of vertical space before the option list is even shown to the user.",
+            context: "This is intentionally long context to stress the height budget calculation and confirm that we degrade to the dialog-based inline flow instead of rendering a clipped custom overlay when the terminal is extremely short.",
+            options: ["A", "B", "C", "D", "E", "F"],
+            allowFreeform: false,
+         },
+         undefined,
+         undefined,
+         {
+            hasUI: true,
+            ui: {
+               custom: async (factory: any) => {
+                  let resolved: any;
+                  factory(
+                     { requestRender() { }, terminal: { rows: 12, cols: 80 } },
+                     createTheme(),
+                     createKeybindings(),
+                     (value: any) => {
+                        resolved = value;
+                     },
+                  );
+                  return resolved ?? { answer: "__OVERLAY__", wasCustom: false };
+               },
+               select: async () => {
+                  selectCalled = true;
+                  return "B";
+               },
+               input: async () => undefined,
+            },
+         },
+      );
+
+      expect(result.isError).not.toBe(true);
+      expect(selectCalled).toBe(true);
+      expect(result.details.answer).toBe("B");
+      expect(result.details.cancelled).toBe(false);
+   });
+
    test("renders partial updates as waiting state instead of a successful empty answer", async () => {
       const tool = await setupTool();
       let partialUpdate: any;

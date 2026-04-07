@@ -58,6 +58,45 @@ interface AskUIResult {
    wasCustom: boolean;
 }
 
+interface AskDialogFallbackSignal {
+   fallbackToDialogs: true;
+}
+
+function estimateAskOverlayInnerWidth(cols: number | undefined): number {
+   const safeCols = cols && Number.isFinite(cols) ? cols : 100;
+   const overlayWidth = Math.max(ASK_OVERLAY_MIN_WIDTH, Math.floor(safeCols * 0.92));
+   return Math.max(1, overlayWidth - BOX_BORDER_OVERHEAD);
+}
+
+function countWrappedLinesForBudget(text: string, width: number): number {
+   return Math.max(1, wrapTextWithAnsi(text, Math.max(10, width - 2)).length);
+}
+
+function estimateAskStaticLines(question: string, context: string | undefined, width: number): number {
+   const titleLines = 1;
+   const questionLines = countWrappedLinesForBudget(question, width);
+   const contextLines = context ? 1 + countWrappedLinesForBudget(context, width) : 0;
+   const helpLines = 1;
+   const borderLines = 2;
+   const spacerLines = context ? 6 : 5;
+   return borderLines + spacerLines + titleLines + questionLines + contextLines + helpLines;
+}
+
+function shouldUseDialogFallback(
+   rows: number,
+   cols: number | undefined,
+   question: string,
+   context: string | undefined,
+): boolean {
+   if (rows < ASK_OVERLAY_MIN_TERMINAL_ROWS) return true;
+
+   const innerWidth = estimateAskOverlayInnerWidth(cols);
+   const overlayMaxHeight = Math.max(12, Math.floor(rows * ASK_OVERLAY_MAX_HEIGHT_RATIO));
+   const staticLines = estimateAskStaticLines(question, context, innerWidth);
+   const availableOptionRows = overlayMaxHeight - staticLines;
+   return availableOptionRows < ASK_OVERLAY_MIN_OPTION_ROWS;
+}
+
 function normalizeOptions(options: AskOptionInput[]): QuestionOption[] {
    return options
       .map((option) => {
@@ -177,6 +216,8 @@ const SINGLE_SELECT_SPLIT_PANE_LEFT_MIN_WIDTH = 32;
 const SINGLE_SELECT_SPLIT_PANE_RIGHT_MIN_WIDTH = 28;
 const SINGLE_SELECT_SPLIT_PANE_SEPARATOR = " │ ";
 const FREEFORM_SENTINEL = "\u270f\ufe0f Type custom response...";
+const ASK_OVERLAY_MIN_TERMINAL_ROWS = 14;
+const ASK_OVERLAY_MIN_OPTION_ROWS = 5;
 
 class MultiSelectList implements Component {
    private options: QuestionOption[];
@@ -1123,8 +1164,13 @@ export default function(pi: ExtensionAPI) {
          let result: AskUIResult | null;
          try {
             // custom() returns undefined in RPC/headless mode — fall back to dialog methods
-            const customResult = await ctx.ui.custom<AskUIResult | null>(
+            const customResult = await ctx.ui.custom<AskUIResult | AskDialogFallbackSignal | null>(
                (tui, theme, keybindings, done) => {
+                  if (shouldUseDialogFallback(tui.terminal.rows, tui.terminal.cols, question, normalizedContext)) {
+                     done({ fallbackToDialogs: true });
+                     return new Text("", 0, 0);
+                  }
+
                   // Wire AbortSignal so agent cancellation auto-dismisses the overlay
                   if (signal) {
                      const onAbort = () => done(null);
@@ -1160,7 +1206,9 @@ export default function(pi: ExtensionAPI) {
                },
             );
 
-            if (customResult !== undefined) {
+            if (customResult && typeof customResult === "object" && "fallbackToDialogs" in customResult) {
+               result = await askViaDialogs(ctx.ui, question, normalizedContext, options, allowMultiple, allowFreeform, timeout);
+            } else if (customResult !== undefined) {
                result = customResult;
             } else {
                // RPC/headless mode: degrade to select()/input() dialog protocol
